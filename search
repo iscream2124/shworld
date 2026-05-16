@@ -17,10 +17,23 @@ EXCLUDED = {
     "/dev",
     "/private/var/vm",
     "/private/var/folders",
+    "/private/var/run",
+    "/private/tmp",
+    "/private/var/log",
     "/System/Volumes/VM",
     "/System/Volumes/Preboot",
     "/System/Volumes/Update",
+    "/System/Volumes/Data/private/var/folders",
+    "/.Spotlight-V100",
+    "/.fseventsd",
+    "/.vol",
+    "/net",
+    "/home",
+    "/cores",
 }
+
+# 어느 경로에 있어도 스킵할 디렉토리 이름
+EXCLUDED_NAMES = {"node_modules", ".git", ".Trash", "__pycache__", ".cache"}
 
 
 def get_db():
@@ -44,12 +57,12 @@ def rebuild_index():
     conn.execute("DELETE FROM files")
     count = 0
     batch = []
+    last_print = time.monotonic()
 
     for root, dirs, files in os.walk("/", followlinks=False):
-        # 제외 경로 스킵
         dirs[:] = [
             d for d in dirs
-            if os.path.join(root, d) not in EXCLUDED
+            if os.path.join(root, d) not in EXCLUDED and d not in EXCLUDED_NAMES
         ]
 
         for name in files:
@@ -73,6 +86,10 @@ def rebuild_index():
             conn.commit()
             count += len(batch)
             batch = []
+            now = time.monotonic()
+            if now - last_print >= 3:
+                print(f"  {count:,}개 스캔 중...", file=sys.stderr)
+                last_print = now
 
     if batch:
         conn.executemany("INSERT OR REPLACE INTO files VALUES (?,?,?,?)", batch)
@@ -80,10 +97,7 @@ def rebuild_index():
         count += len(batch)
 
     conn.close()
-
-    with open(CONFIG_PATH, "w") as f:
-        json.dump({"last_scan": time.time(), "count": count}, f)
-
+    CONFIG_PATH.write_text(json.dumps({"last_scan": time.time(), "count": count}))
     return count
 
 
@@ -108,8 +122,11 @@ def get_stats():
     if not CONFIG_PATH.exists():
         print("인덱스 없음. 먼저 실행: search --rebuild")
         return
-    with open(CONFIG_PATH) as f:
-        config = json.load(f)
+    try:
+        config = json.loads(CONFIG_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        print("설정 파일 오류. search --rebuild 로 재빌드하세요.")
+        return
     last_scan = config.get("last_scan", 0)
     count = config.get("count", 0)
     elapsed = time.time() - last_scan

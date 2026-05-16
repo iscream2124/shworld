@@ -241,7 +241,7 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/open":
             params = parse_qs(parsed.query)
             path = params.get("path", [""])[0]
-            if path:
+            if path and os.path.exists(path):
                 subprocess.run(["open", "-R", path], check=False)
             self.send_json({"ok": True})
 
@@ -262,7 +262,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _search(q, limit):
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    if not os.path.exists(DB_PATH):
+        return []
+    try:
+        con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    except sqlite3.OperationalError:
+        return []
     try:
         # Prefix match uses idx_name — fast
         prefix = con.execute(
@@ -283,6 +288,8 @@ def _search(q, limit):
         ).fetchall()
 
         return [_row(r) for r in prefix] + [_row(r) for r in substr if r[1] not in seen]
+    except sqlite3.OperationalError:
+        return []
     finally:
         con.close()
 

@@ -5,6 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "File Search 설치 중..."
 
+# Python 3 확인
+if ! command -v python3 &>/dev/null; then
+    echo "오류: python3가 설치되어 있지 않습니다."
+    echo "https://www.python.org/downloads/ 에서 설치 후 다시 실행하세요."
+    exit 1
+fi
+
 # 1. 디렉토리 생성
 mkdir -p ~/.search ~/.local/bin ~/Library/LaunchAgents
 
@@ -13,7 +20,19 @@ cp "$SCRIPT_DIR/server.py" ~/.search/server.py
 cp "$SCRIPT_DIR/search"    ~/.local/bin/search
 chmod +x ~/.local/bin/search
 
-# 3. LaunchAgent plist 생성 (경로를 현재 사용자 홈에 맞게 동적 생성)
+# 3. ~/.local/bin 을 PATH에 추가 (없는 경우에만)
+SHELL_RC=""
+if [[ "$SHELL" == */zsh ]]; then
+    SHELL_RC="$HOME/.zshrc"
+elif [[ "$SHELL" == */bash ]]; then
+    SHELL_RC="$HOME/.bash_profile"
+fi
+if [[ -n "$SHELL_RC" ]] && ! grep -q '\.local/bin' "$SHELL_RC" 2>/dev/null; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_RC"
+    echo "PATH에 ~/.local/bin 추가 → $SHELL_RC"
+fi
+
+# 4. LaunchAgent plist 생성 (경로를 현재 사용자 홈에 맞게 동적 생성)
 cat > ~/Library/LaunchAgents/com.user.filesearch.plist << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -38,15 +57,23 @@ cat > ~/Library/LaunchAgents/com.user.filesearch.plist << PLIST
 </plist>
 PLIST
 
-# 4. 초기 파일 인덱스 빌드 (전체 디스크 스캔 — 수 분 소요)
+# 5. 초기 파일 인덱스 빌드 (전체 디스크 스캔 — 수 분 소요)
 echo "파일 인덱스 빌드 중... (처음에는 몇 분 걸릴 수 있어요)"
-python3 ~/.local/bin/search --rebuild
+python3 "$HOME/.local/bin/search" --rebuild
 
-# 5. 서버 자동 시작 등록
+# 6. 서버 자동 시작 등록
 launchctl unload ~/Library/LaunchAgents/com.user.filesearch.plist 2>/dev/null || true
 launchctl load  ~/Library/LaunchAgents/com.user.filesearch.plist
 
 echo ""
 echo "설치 완료!"
 echo "→ http://127.0.0.1:7070"
+
+# 서버가 뜰 때까지 최대 5초 대기
+for i in 1 2 3 4 5; do
+    if curl -s http://127.0.0.1:7070 &>/dev/null; then
+        break
+    fi
+    sleep 1
+done
 open http://127.0.0.1:7070
