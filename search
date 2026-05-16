@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+import os
+import sys
+import sqlite3
+import json
+import argparse
+import time
+import subprocess
+from pathlib import Path
+
+DB_DIR = Path.home() / ".search"
+DB_PATH = DB_DIR / "index.db"
+CONFIG_PATH = DB_DIR / "config.json"
+
+# macOS에서 스캔 제외할 경로
+EXCLUDED = {
+    "/dev",
+    "/private/var/vm",
+    "/private/var/folders",
+    "/System/Volumes/VM",
+    "/System/Volumes/Preboot",
+    "/System/Volumes/Update",
+}
+
+
+def get_db():
+    DB_DIR.mkdir(exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS files (
+            path TEXT PRIMARY KEY,
+            name TEXT,
+            type TEXT,
+            mtime INTEGER
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_name ON files(name)")
+    conn.commit()
+    return conn
+
+
+def rebuild_index():
+    conn = get_db()
+    conn.execute("DELETE FROM files")
+    count = 0
+    batch = []
+
+    for root, dirs, files in os.walk("/", followlinks=False):
+        # 제외 경로 스킵
+        dirs[:] = [
+            d for d in dirs
+            if os.path.join(root, d) not in EXCLUDED
+        ]
+
+        for name in files:
+            path = os.path.join(root, name)
+            try:
+                mtime = int(os.path.getmtime(path))
+                batch.append((path, name, "f", mtime))
+            except OSError:
+                continue
+
+        for name in dirs:
+            path = os.path.join(root, name)
+            try:
+                mtime = int(os.path.getmtime(path))
+                batch.append((path, name, "d", mtime))
+            except OSError:
+                continue
+
+        if len(batch) >= 10000:
+            conn.executemany("INSERT OR REPLACE INTO files VALUES (?,?,?,?)", batch)
+            conn.commit()
+            count += len(batch)
+            batch = []
+
+    if batch:
+        conn.executemany("INSERT OR REPLACE INTO files VALUES (?,?,?,?)", batch)
+        conn.commit()
+        count += len(batch)
+
+    conn.close()
+
+    with open(CONFIG_PATH, "w") as f:
+        json.dump({"last_scan": time.time(), "count": count}, f)
+
+    return count
+
+
+def do_search(query, limit, file_type):
+    conn = get_db()
+    if file_type:
+        rows = conn.execute(
+            "SELECT path FROM files WHERE name LIKE ? AND type = ? LIMIT ?",
+            (f"%{query}%", file_type, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT path FROM files WHERE name LIKE ? LIMIT ?",
+            (f"%{query}%", limit),
+        ).fetchall()
+    conn.close()
+    for row in rows:
+        print(row[0])
+
+
+def get_stats():
+    if not CONFIG_PATH.exists():
+        print("인덱스 없음. 먼저 실행: search --rebuild")
+        return
+    with open(CONFIG_PATH) as f:
+        config = json.load(f)
+    last_scan = config.get("last_scan", 0)
+    count = config.get("count", 0)
+    elapsed = time.time() - last_scan
+    if elapsed < 3600:
+        age = f"{int(elapsed / 60)}분 전"
+    elif elapsed < 86400:
+        age = f"{int(elapsed / 3600)}시간 전"
+    else:
+        age = f"{int(elapsed / 86400)}일 전"
+    print(f"파일 수  : {count:,}")
+    print(f"마지막 스캔: {age}")
+
+
+def index_is_stale():
+    if not CONFIG_PATH.exists():
+        return True
+    try:
+        with open(CONFIG_PATH) as f:
+            config = json.load(f)
+        return (time.time() - config.get("last_scan", 0)) > 86400
+    except Exception:
+        return True
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="search", description="빠른 파일명 검색")
+    parser.add_argument("query", nargs="?", help="검색어 (파일명 부분 일치)")
+    parser.add_argument("--rebuild", action="store_true", help="인덱스 재빌드")
+    parser.add_argument("--stats", action="store_true", help="인덱스 정보 출력")
+    parser.add_argument("--limit", type=int, default=50, help="최대 결과 수 (기본: 50)")
+    parser.add_argument(
+        "--type", dest="file_type", choices=["f", "d"], help="f=파일만, d=디렉토리만"
+    )
+    args = parser.parse_args()
+
+    if args.rebuild:
+        print("인덱스 재빌드 중... (시간이 걸릴 수 있어요)", file=sys.stderr)
+        count = rebuild_index()
+        print(f"완료: {count:,}개 항목", file=sys.stderr)
+        return
+
+    if args.stats:
+        get_stats()
+        return
+
+    if not args.query:
+        parser.print_help()
+        return
+
+    # 인덱스가 없으면 최초 빌드 (인라인, 검색 전에 필요)
+    if not DB_PATH.exists():
+        print("처음 실행입니다. 인덱스를 빌드합니다...", file=sys.stderr)
+        count = rebuild_index()
+        print(f"완료: {count:,}개 항목", file=sys.stderr)
+    elif index_is_stale():
+        # 인덱스가 오래됐으면 백그라운드에서 재스캔
+        script_path = os.path.realpath(__file__)
+        subprocess.Popen(
+            [sys.executable, script_path, "--rebuild"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    do_search(args.query, args.limit, args.file_type)
+
+
+if __name__ == "__main__":
+    main()
